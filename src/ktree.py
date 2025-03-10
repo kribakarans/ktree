@@ -4,21 +4,43 @@ import os
 import re
 import shutil
 import subprocess
+import http.server
+import socketserver
+import threading
+import logging
 
-# Paths for installed resources
+# Configuration
+SERVER_PORT = 1111
 KTRACE_HOME = os.path.expanduser("~/.ktree")
 RESOURCES_PATH = os.path.join(KTRACE_HOME, "res")
 VIEWER_HTML = os.path.join(KTRACE_HOME, "viewer.html")
 
+# Setup logging
+logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+
+
 def generate_index_html(title: str, ignore_patterns: list):
-    """Runs the `tree` command and modifies `index.html`."""
+    """Generates `index.html` with a file tree and custom styling."""
     ignore_arg = f"-I '{'|'.join(ignore_patterns)}'" if ignore_patterns else ""
-    subprocess.run(f'tree -H . -T "Ktree: {title}" {ignore_arg} --noreport -o index.html', shell=True)
+
+    try:
+        # Run `tree` command to generate the HTML file
+        subprocess.run(
+            f'tree -H . -T "Ktree: {title}" {ignore_arg} --noreport -o index.html',
+            shell=True, check=True
+        )
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Failed to run `tree` command: {e}")
+        return
+
+    if not os.path.exists("index.html"):
+        logging.error("index.html was not created. Check if `tree` command is installed.")
+        return
 
     with open("index.html", "r", encoding="utf-8") as file:
         html_content = file.read()
 
-    # Update footer
+    # Update footer text
     html_content = re.sub(
         r'<p class="VERSION">.*?</p>',
         '<p class="VERSION">Built with Klab HTML Tree View Generator</p>',
@@ -26,7 +48,7 @@ def generate_index_html(title: str, ignore_patterns: list):
         flags=re.DOTALL
     )
 
-    # Inject custom styles (Dark text on light gray background)
+    # Inject custom styles for better UI
     custom_style = """
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
@@ -48,7 +70,7 @@ def generate_index_html(title: str, ignore_patterns: list):
     """
     html_content = html_content.replace("<head>", f"<head>\n{custom_style}", 1)
 
-    # Update links to open in `viewer.html` without `../`
+    # Update links to open in `viewer.html`
     html_content = re.sub(
         r'<a href="([^"]+)"',
         r'<a target="_blank" href="__ktree/viewer.html?file=\1"',
@@ -58,10 +80,12 @@ def generate_index_html(title: str, ignore_patterns: list):
     with open("index.html", "w", encoding="utf-8") as file:
         file.write(html_content)
 
+    logging.info("Generated index.html with custom styles and viewer links.")
+
+
 def setup_ktree_resources():
     """Creates `__ktree/` and copies required resources."""
-    if not os.path.exists("__ktree"):
-        os.mkdir("__ktree")
+    os.makedirs("__ktree/res", exist_ok=True)
 
     # Copy `res/` folder
     dest_res_path = os.path.join("__ktree", "res")
@@ -72,8 +96,25 @@ def setup_ktree_resources():
     # Copy `viewer.html`
     shutil.copy(VIEWER_HTML, os.path.join("__ktree", "viewer.html"))
 
+    logging.info("Setup Ktree resources in '__ktree/' directory.")
+
+
+def start_server(port: int):
+    """Starts a reusable HTTP server to serve the generated site."""
+    class CustomHandler(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, format, *args):
+            logging.info("%s - %s" % (self.client_address[0], format % args))
+
+    try:
+        with socketserver.TCPServer(("", port), CustomHandler) as httpd:
+            logging.info(f"Serving at http://localhost:{port}")
+            httpd.serve_forever()
+    except OSError as e:
+        logging.error(f"Failed to start server on port {port}: {e}")
+
+
 def main():
-    """Main function to handle arguments and execute tasks."""
+    """Main function to generate the website and start the server."""
     import sys
     args = sys.argv[1:]
 
@@ -81,11 +122,24 @@ def main():
     title = os.path.basename(os.getcwd()) if not args else args[0]
     ignore_patterns = args[1:]
 
-    print(f"Generating website ...")
+    logging.info("Generating website...")
     generate_index_html(title, ignore_patterns)
 
     setup_ktree_resources()
-    print(f"Ktree: Generated HTML treeview. Open 'index.html' to explore.")
+    logging.info("Ktree: Generated HTML treeview. Open 'index.html' to explore.")
+
+    # Start HTTP server in a separate thread (non-blocking execution)
+    server_thread = threading.Thread(target=start_server, args=(SERVER_PORT,), daemon=True)
+    server_thread.start()
+
+    # Keep the main thread alive to catch keyboard interrupts
+    try:
+        while True:
+            pass
+    except KeyboardInterrupt:
+        logging.info("\nShutting down server...")
+
 
 if __name__ == "__main__":
     main()
+
